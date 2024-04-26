@@ -69,14 +69,21 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
+// 空闲块中的前一个和后一个偏移量
+#define PREV_VAL(bp) ((int)(*bp))
+#define NEXT_VAL(bp) ((int)(*(bp + 1)))
+
 // 空闲块中的前一个和后一个指针
 #define PREV(bp) ((char *)(bp))
-#define NEXT(bp) ((char *)(bp) + WSIZE)
+#define NEXT(bp) ((char *)(bp + WSIZE))
 
 static void *extend_heap(size_t words);
-static void *next_fit(size_t asize);
+// static void *next_fit(size_t asize);
+static void *first_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static void *coalesce(void *bp);
+static void fix_ptr(void *bp);
+static void make_LIFO(char *bp);
 
 static char *heap_listp;
 static char *root;
@@ -87,16 +94,16 @@ static char *root;
 int mm_init(void)
 {
     /* Create the initial empty heap */
-    if ((heap_listp = mem_sbrk(4 * WSIZE + 2 * DSIZE)) == (void *)-1)
+    if ((heap_listp = mem_sbrk(4 * WSIZE + 2 * WSIZE)) == (void *)-1)
         return -1;
     PUT(heap_listp, 0);                            /* Alignment padding */
-    PUT(heap_listp + (1 * WSIZE), 0);              //前驱指针
-    PUT(heap_listp + (1 * WSIZE + 1 * DSIZE), 0);              //后继指针
-    PUT(heap_listp + (1 * WSIZE + 2 * DSIZE), PACK(DSIZE, 1)); /* Prologue header */
-    PUT(heap_listp + (2 * WSIZE + 2 * DSIZE), PACK(DSIZE, 1)); /* Prologue footer */
-    PUT(heap_listp + (3 * WSIZE + 2 * DSIZE), PACK(0, 1));     /* Epilogue header */
+    PUT(heap_listp + (1 * WSIZE), 0);              //前驱大小
+    PUT(heap_listp + (1 * WSIZE + 1 * WSIZE), 0);              //后继大小
+    PUT(heap_listp + (1 * WSIZE + 2 * WSIZE), PACK(DSIZE, 1)); /* Prologue header */
+    PUT(heap_listp + (2 * WSIZE + 2 * WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
+    PUT(heap_listp + (3 * WSIZE + 2 * WSIZE), PACK(0, 1));     /* Epilogue header */
     root = heap_listp + (1 * WSIZE);
-    heap_listp += (6 * WSIZE);
+    heap_listp += (4 * WSIZE);
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
@@ -115,10 +122,12 @@ static void *extend_heap(size_t words)
         return NULL;
 
     /* Initialize free block header/footer and the epilogue header */
-
     PUT(HDRP(bp), PACK(size, 0));         /* Free block header */
     PUT(FTRP(bp), PACK(size, 0));         /* Free block footer */
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* 新的尾部 */
+
+    PUT(PREV(bp), 0); //前驱置为0
+    PUT(NEXT(bp), 0); //后继置为0
 
     /* Coalesce if the previous block was free */
     return coalesce(bp);
@@ -126,21 +135,28 @@ static void *extend_heap(size_t words)
 
 static void place(void *bp, size_t asize)
 {
-    size_t size = GET_SIZE(HDRP(bp));
+    size_t size = GET_SIZE(HDRP(bp)); //当前块的大小
+    fix_ptr(bp); //修正指针
 
     if ((size - asize) >= (2 * DSIZE))
     {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        PUT(HDRP(NEXT_BLKP(bp)), PACK(size - asize, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size - asize, 0));
+
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(size - asize, 0));
+        PUT(FTRP(bp), PACK(size - asize, 0));
+
+        PUT(PREV(bp), 0); //前驱置为0
+        PUT(NEXT(bp), 0); //后继置为0
+        make_LIFO(bp);
     }
     else
     {
         PUT(HDRP(bp), PACK(size, 1));
         PUT(FTRP(bp), PACK(size, 1));
     }
-    pre_listp = bp;
+    // pre_listp = bp;
 }
 
 /*
@@ -148,48 +164,64 @@ static void place(void *bp, size_t asize)
  */
 void mm_free(void *bp)
 {
+    if(bp == 0)
+    {
+        return;
+    }
+
     size_t size = GET_SIZE(HDRP(bp));
 
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
+
+    PUT(PREV(bp), 0); //free的时候还用置为0吗？？？
+    PUT(NEXT(bp), 0);
+
     coalesce(bp);
 }
 
 static void *coalesce(void *bp)
 {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
-    if (prev_alloc && next_alloc)
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); //前一个块的尾部
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); //后一个块的头部
+    size_t size = GET_SIZE(HDRP(bp)); //当前块的大小
+
+    if (prev_alloc && next_alloc) //都是已分配的情况
     { // Case 1
-        pre_listp = bp;
-        return bp;
+        // pre_listp = bp;
+        // return bp;，这里不需要返回，因为还要LIFO
     }
 
-    if (prev_alloc && !next_alloc)
-    { /* Case 2 */
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+    if (prev_alloc && !next_alloc) 
+    { /* Case 2 下一个是空的*/
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); //合并大小
+        fix_ptr(NEXT_BLKP(bp)); //修正指针
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
     }
 
     else if (!prev_alloc && next_alloc)
-    { /* Case 3 */
+    { /* Case 3 上一个是空的*/
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        fix_ptr(PREV_BLKP(bp)); //修正指针
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
+        bp = PREV_BLKP(bp); //指针指向新的块
     }
-
     else
     { /* Case 4 */
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
                 GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        fix_ptr(PREV_BLKP(bp)); //修正指针
+        fix_ptr(NEXT_BLKP(bp)); //修正指针
+
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
-    pre_listp = bp;
+    // pre_listp = bp;
+    make_LIFO(bp);
+
     return bp;
 }
 
@@ -208,19 +240,19 @@ void *mm_malloc(size_t size)
         return NULL;
 
     /* Adjust block size to include overhead and alignment reqs. */
-    if (size <= DSIZE)
+    if (size <= DSIZE) //调整为至少16个字节
         asize = 2 * DSIZE;
     else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); //调整为8的倍数
 
     /* Search the free list for a fit */
-    if ((bp = next_fit(asize)) != NULL)
+    if ((bp = first_fit(asize)) != NULL)
     {
         place(bp, asize);
         return bp;
     }
 
-    /* No fit found. Get more memory and place the block */
+    /* 放不下的话，扩展新空间，在新的块里面放置 */
     extendsize = MAX(asize, CHUNKSIZE);
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
         return NULL;
@@ -237,7 +269,7 @@ void *mm_realloc(void *ptr, size_t size)
         mm_free(ptr);
         return NULL;
     }
-    size_t adjust_size = ALIGN(size);
+    size_t adjust_size = ALIGN(size); 
     size_t old_size = GET_SIZE(HDRP(ptr));
     if (adjust_size < old_size)
     {
@@ -277,82 +309,84 @@ void *mm_realloc(void *ptr, size_t size)
     //         return prev;
     //     }
     // }
+    
     void *newptr;
     size_t copySize;
-    newptr = mm_malloc(size);
+    newptr = mm_malloc(size); //malloc返回的是bp
     if (newptr == NULL)
         return NULL;
     size = GET_SIZE(HDRP(ptr));
     copySize = GET_SIZE(HDRP(newptr));
-    if (size < copySize)
+    if (size < copySize) //如果原来的块比新的块小,就只复制原来块的大小
         copySize = size;
-    memmove(newptr, ptr, copySize - WSIZE);
+    memmove(newptr, ptr, copySize - WSIZE); //复制原来块的内容到新的块,不包括头部
     mm_free(ptr);
     return newptr;
 }
 
-static void *next_fit(size_t size)
+static void *first_fit(size_t asize)
 {
-    void *bp;
-    void *min = pre_listp;
-    int extra = 50;
-    for (; GET_SIZE(HDRP(min)) > 0; min = NEXT_BLKP(min))
+    char *bp = root;
+    while (bp != 0)
     {
-        if (!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min))))
+        if (GET_SIZE(HDRP(bp)) >= asize)
         {
-            break;
+            return bp;
         }
+        bp = bp + NEXT_VAL(bp);
     }
-    int count = 0;
-    for (bp = pre_listp; GET_SIZE(HDRP(bp)) > 0 && count < extra; bp = NEXT_BLKP(bp))
+    return NULL;
+}
+
+static void fix_ptr(void *bp)
+{
+    if (bp == NULL || GET_ALLOC(HDRP(bp))) //如果是已分配的块，不需要修正
     {
-        count++;
-        if (!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp))))
+        printf("bp is null or allocated\n"); //正常情况下不会进入这里
+        return;
+    }
+
+    int prev_val = GET(PREV(bp));
+    int next_val = GET(NEXT(bp));
+
+    if (prev_val == 0) //前一个是root
+    {
+        int next_offset;
+        if(next_val)
         {
-            if (GET_SIZE(HDRP(min)) > GET_SIZE(HDRP(bp)))
-            {
-                min = bp;
-            }
+            char* next = bp + next_val;
+            next_offset = (int)(next - root);
+            PUT(PREV(next), next_offset);
         }
+        next_offset = prev_val + next_val;
+        PUT(root, -next_offset);
     }
-
-    bp = min;
-
-    if (!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min))))
+    else
     {
-        pre_listp = bp;
-        return bp;
-    }
-
-    for (min = heap_listp; GET_SIZE(HDRP(min)) > 0; min = NEXT_BLKP(min))
-    {
-        if (!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min))))
+        char* prev = bp + prev_val;
+        char* next = bp + next_val;
+        if(next_val)
         {
-            break;
+            int next_offset = (int)(next - prev);
+            PUT(PREV(next), next_offset);
         }
+        int prev_offset = (int)(prev - next);
+        PUT(NEXT(prev), prev_offset);
     }
+    
+}
 
-    count = 0;
-
-    for (bp = pre_listp; GET_SIZE(HDRP(bp)) > 0 && count < extra; bp = NEXT_BLKP(bp))
+static void make_LIFO(char *bp)
+{
+    int old_head_offset = GET(root);
+    int new_head_offset = (int)(bp - root);
+    if (old_head_offset != 0) //有后续空节点
     {
-        count++;
-        if (!GET_ALLOC(HDRP(bp)) && (size <= GET_SIZE(HDRP(bp))))
-        {
-            if (GET_SIZE(HDRP(min)) > GET_SIZE(HDRP(bp)))
-            {
-                min = bp;
-            }
-        }
+        char* old_head = root + old_head_offset;
+        PUT(PREV(old_head), old_head_offset - new_head_offset); //旧的头节点的前驱指向新的头节点
     }
+    PUT(NEXT(bp), new_head_offset - old_head_offset); //新的头节点的后继指向旧的头节点
+    PUT(PREV(bp), new_head_offset); //新的头节点的前驱指向root
+    PUT(root, new_head_offset); //root指向新的头节点
 
-    bp = min;
-
-    if (!GET_ALLOC(HDRP(min)) && (size <= GET_SIZE(HDRP(min))))
-    {
-        pre_listp = bp;
-        return bp;
-    }
-
-    return NULL; /* No fit */
 }
