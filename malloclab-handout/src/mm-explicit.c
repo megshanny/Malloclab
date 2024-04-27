@@ -57,6 +57,9 @@ team_t team = {
 #define GET(p) (*(unsigned int *)(p))
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
 
+#define GET_INT(p) (*(int *)(p))
+#define PUT_INT(p, val) (*(int *)(p) = (val))
+
 /* Read the size and allocated fields from address p 第一个字节*/
 #define GET_SIZE(p) (GET(p) & ~0x7)
 #define GET_ALLOC(p) (GET(p) & 0x1)
@@ -69,13 +72,12 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
-// 空闲块中的前一个和后一个偏移量
-#define PREV_VAL(bp) ((int)(*bp))
-#define NEXT_VAL(bp) ((int)(*(bp + 1)))
-
 // 空闲块中的前一个和后一个指针
 #define PREV(bp) ((char *)(bp))
 #define NEXT(bp) ((char *)(bp + WSIZE))
+
+#define RT_NEXT_FREEbp ((char *)(root + GET_INT(root)))
+
 
 static void *extend_heap(size_t words);
 // static void *next_fit(size_t asize);
@@ -84,9 +86,12 @@ static void place(void *bp, size_t asize);
 static void *coalesce(void *bp);
 static void fix_ptr(void *bp);
 static void make_LIFO(char *bp);
+static void print_list();
 
 static char *heap_listp;
 static char *root;
+
+static int i;
 
 /*
  * mm_init - initialize the malloc package.
@@ -94,20 +99,19 @@ static char *root;
 int mm_init(void)
 {
     /* Create the initial empty heap */
-    if ((heap_listp = mem_sbrk(4 * WSIZE + 2 * WSIZE)) == (void *)-1)
+    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1)
         return -1;
-    PUT(heap_listp, 0);                            /* Alignment padding */
-    PUT(heap_listp + (1 * WSIZE), 0);              //前驱大小
-    PUT(heap_listp + (1 * WSIZE + 1 * WSIZE), 0);              //后继大小
-    PUT(heap_listp + (1 * WSIZE + 2 * WSIZE), PACK(DSIZE, 1)); /* Prologue header */
-    PUT(heap_listp + (2 * WSIZE + 2 * WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
-    PUT(heap_listp + (3 * WSIZE + 2 * WSIZE), PACK(0, 1));     /* Epilogue header */
-    root = heap_listp + (1 * WSIZE);
-    heap_listp += (4 * WSIZE);
-
+    PUT(heap_listp, 0);                            /* 没有空闲块 */
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); /* Prologue header */
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));     /* Epilogue header */
+    
+    root = heap_listp ;
+    heap_listp += (2 * WSIZE);
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
+
     return 0;
 }
 
@@ -116,47 +120,51 @@ static void *extend_heap(size_t words)
     char *bp;
     size_t size;
 
+    // printf("in extend_heap\n");
     /* Allocate an even number of words to maintain alignment 8字节对齐*/
     size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+    
     if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
-
     /* Initialize free block header/footer and the epilogue header */
     PUT(HDRP(bp), PACK(size, 0));         /* Free block header */
     PUT(FTRP(bp), PACK(size, 0));         /* Free block footer */
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* 新的尾部 */
 
-    PUT(PREV(bp), 0); //前驱置为0
-    PUT(NEXT(bp), 0); //后继置为0
-
-    /* Coalesce if the previous block was free */
-    return coalesce(bp);
+    PUT_INT(PREV(bp), 0); //前驱置为0
+    PUT_INT(NEXT(bp), 0); //后继置为0
+    bp = coalesce(bp);
+    return bp;
 }
 
 static void place(void *bp, size_t asize)
 {
+    // printf("in place\n");
+    
     size_t size = GET_SIZE(HDRP(bp)); //当前块的大小
     fix_ptr(bp); //修正指针
 
     if ((size - asize) >= (2 * DSIZE))
     {
+        // printf("in place\n");
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
 
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(size - asize, 0));
-        PUT(FTRP(bp), PACK(size - asize, 0));
+        void* bp1 = NEXT_BLKP(bp);
+        PUT(HDRP(bp1), PACK(size - asize, 0));
+        PUT(FTRP(bp1), PACK(size - asize, 0));
 
-        PUT(PREV(bp), 0); //前驱置为0
-        PUT(NEXT(bp), 0); //后继置为0
-        make_LIFO(bp);
+        PUT_INT(PREV(bp1), 0); //前驱置为0
+        PUT_INT(NEXT(bp1), 0); //后继置为0
+
+        coalesce(bp1);
+      
     }
     else
     {
         PUT(HDRP(bp), PACK(size, 1));
         PUT(FTRP(bp), PACK(size, 1));
     }
-    // pre_listp = bp;
 }
 
 /*
@@ -164,7 +172,8 @@ static void place(void *bp, size_t asize)
  */
 void mm_free(void *bp)
 {
-    if(bp == 0)
+    printf("in free\n");
+    if(bp == NULL)
     {
         return;
     }
@@ -174,25 +183,23 @@ void mm_free(void *bp)
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
 
-    PUT(PREV(bp), 0); //free的时候还用置为0吗？？？
-    PUT(NEXT(bp), 0);
+    PUT_INT(PREV(bp), 0); //前驱置为0
+    PUT_INT(NEXT(bp), 0);
 
     coalesce(bp);
 }
 
 static void *coalesce(void *bp)
 {
+    // printf("in coalesce\n");
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); //前一个块的尾部
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); //后一个块的头部
     size_t size = GET_SIZE(HDRP(bp)); //当前块的大小
-
     if (prev_alloc && next_alloc) //都是已分配的情况
     { // Case 1
-        // pre_listp = bp;
-        // return bp;，这里不需要返回，因为还要LIFO
-    }
 
-    if (prev_alloc && !next_alloc) 
+    }
+    else if (prev_alloc && !next_alloc) 
     { /* Case 2 下一个是空的*/
         size += GET_SIZE(HDRP(NEXT_BLKP(bp))); //合并大小
         fix_ptr(NEXT_BLKP(bp)); //修正指针
@@ -219,9 +226,9 @@ static void *coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
-    // pre_listp = bp;
     make_LIFO(bp);
 
+    // printf("out coalesce\n");
     return bp;
 }
 
@@ -231,6 +238,9 @@ static void *coalesce(void *bp)
  */
 void *mm_malloc(size_t size)
 {
+    // printf("in malloc\n");
+    // print_list();
+    printf("in malloc %d\n", i++);
     size_t asize;      /* Adjusted block size */
     size_t extendsize; /* Amount to extend heap if no fit */
     char *bp;
@@ -248,20 +258,26 @@ void *mm_malloc(size_t size)
     /* Search the free list for a fit */
     if ((bp = first_fit(asize)) != NULL)
     {
+        // printf("find fit\n");
+
         place(bp, asize);
+        // printf("bp: %p\n", bp);
         return bp;
     }
 
+    // printf("not find fit\n");
     /* 放不下的话，扩展新空间，在新的块里面放置 */
     extendsize = MAX(asize, CHUNKSIZE);
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
         return NULL;
+    // printf("extend success\n");
     place(bp, asize);
     return bp;
 }
 
 void *mm_realloc(void *ptr, size_t size)
 {
+    printf("in realloc\n");
     if (ptr == NULL)
         return mm_malloc(size);
     if (size == 0)
@@ -326,14 +342,26 @@ void *mm_realloc(void *ptr, size_t size)
 
 static void *first_fit(size_t asize)
 {
-    char *bp = root;
-    while (bp != 0)
+    if (GET_INT(root) == 0)
+    {
+        return NULL;
+    }
+    
+    // printf("in first_fit\n");
+    char *bp = RT_NEXT_FREEbp;
+
+    while (GET_SIZE(HDRP(bp)) != 0)
     {
         if (GET_SIZE(HDRP(bp)) >= asize)
         {
+            // printf("out first_fit\n");
             return bp;
         }
-        bp = bp + NEXT_VAL(bp);
+        if (GET_INT(NEXT(bp)) == 0)
+        {
+            return NULL;
+        }
+        bp = bp + GET_INT(NEXT(bp));
     }
     return NULL;
 }
@@ -346,8 +374,8 @@ static void fix_ptr(void *bp)
         return;
     }
 
-    int prev_val = GET(PREV(bp));
-    int next_val = GET(NEXT(bp));
+    int prev_val = GET_INT(PREV(bp));
+    int next_val = GET_INT(NEXT(bp));
 
     if (prev_val == 0) //前一个是root
     {
@@ -356,10 +384,14 @@ static void fix_ptr(void *bp)
         {
             char* next = bp + next_val;
             next_offset = (int)(next - root);
-            PUT(PREV(next), next_offset);
+            PUT_INT(PREV(next), -next_offset);
+            PUT_INT(root, next_offset);
         }
-        next_offset = prev_val + next_val;
-        PUT(root, -next_offset);
+        else
+        {
+            PUT_INT(root, 0);
+        }
+        
     }
     else
     {
@@ -368,25 +400,48 @@ static void fix_ptr(void *bp)
         if(next_val)
         {
             int next_offset = (int)(next - prev);
-            PUT(PREV(next), next_offset);
+            PUT_INT(PREV(next), -next_offset);
+            PUT_INT(NEXT(prev), next_offset);
         }
-        int prev_offset = (int)(prev - next);
-        PUT(NEXT(prev), prev_offset);
+        else
+        {
+            PUT_INT(NEXT(prev), 0);
+        }
+        
     }
     
 }
 
 static void make_LIFO(char *bp)
-{
-    int old_head_offset = GET(root);
-    int new_head_offset = (int)(bp - root);
-    if (old_head_offset != 0) //有后续空节点
+{   
+    if (GET_INT(root) != 0) //有后续空节点
     {
-        char* old_head = root + old_head_offset;
-        PUT(PREV(old_head), old_head_offset - new_head_offset); //旧的头节点的前驱指向新的头节点
+        char* old_head = RT_NEXT_FREEbp;
+        PUT_INT(PREV(old_head),  bp- old_head ); //旧的头节点的前驱指向新的头节点
+        PUT_INT(NEXT(bp),  old_head- bp); //新的头节点的后继指向旧的头节点
+        PUT_INT(PREV(bp), 0); //新的头节点的前驱指向root
+        int new_head_offset = (int)(root - bp);
+        PUT_INT(root, -new_head_offset); //root指向新的头节点
     }
-    PUT(NEXT(bp), new_head_offset - old_head_offset); //新的头节点的后继指向旧的头节点
-    PUT(PREV(bp), new_head_offset); //新的头节点的前驱指向root
-    PUT(root, new_head_offset); //root指向新的头节点
+    else
+    {
+        PUT_INT(root, -(root - bp)); //root指向新的头节点
+        PUT_INT(PREV(bp), 0); //新的头节点的前驱指向root
+        PUT_INT(NEXT(bp), 0); //新的头节点的后继指向0
+    }
 
+}
+
+static void print_list()
+{
+    char *bp = root + GET_INT(root);
+    while (1)
+    {
+        printf("bp: %p\n", bp);
+        if (GET_INT(NEXT(bp)) == 0)
+        {
+            return;
+        }
+        bp = bp + GET_INT(NEXT(bp));
+    }
 }
