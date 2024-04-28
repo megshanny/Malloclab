@@ -1,4 +1,4 @@
-
+// 借鉴的代码ww
 /*
  * Simple, 32-bit and 64-bit clean allocator based on implicit free
  * lists, first-fit placement, and boundary tag coalescing, as described
@@ -14,11 +14,11 @@
 
 team_t team = {
     /* Team name */
-    "iii",
+    "",
     /* First member's full name */
-    "Jiaxin Yu",
+    "",
     /* First member's email address */
-    "2022201895@ruc.edu.cn",
+    "",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
