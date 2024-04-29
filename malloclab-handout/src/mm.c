@@ -237,7 +237,7 @@ void *alloc_space(size_t size)
     size_t asize;      /* Adjusted block size */
     size_t extendsize; /* Amount to extend heap if no fit */
     char *bp;
-    
+
     /* Adjust block size to include overhead and alignment reqs. */
     if (size <= DSIZE) // 调整为至少16个字节
         asize = 2 * DSIZE;
